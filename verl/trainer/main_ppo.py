@@ -29,8 +29,7 @@ logging.basicConfig(
 def _select_rm_score_fn(data_source):
     if data_source == 'openai/gsm8k':
         return gsm8k.compute_score
-    elif data_source in ['lighteval/MATH', '/dccstor/rag_data/math_data']:
-        # return math.compute_score
+    elif data_source == 'math':
         return qwen_math.compute_score
     else:
         raise NotImplementedError
@@ -181,7 +180,7 @@ def main_task(config):
     reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1)
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=5)
+    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=3)
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 

@@ -3,19 +3,20 @@ set -x
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
 N_GPUS=8
-TP=2
-MODEL_DIR=/dccstor/rag_data/math_zero_7b
+TP=1
+MODEL_DIR=/data/yujian_liu/math/ckpts/Qwen-7B
+DATA_DIR=/data/yujian_liu/math/data/verl_train
 BATCH_SIZE=8
 FW_BS=$((BATCH_SIZE * 2))
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=/dccstor/rag_data/math_train/train.parquet \
-    data.val_files=/dccstor/rag_data/math_train/test.parquet \
+    data.train_files=${DATA_DIR}/train.parquet \
+    data.val_files=${DATA_DIR}/test.parquet \
     data.train_batch_size=1024 \
     data.val_batch_size=1312 \
     data.max_prompt_length=512 \
-    data.max_response_length=3072 \
+    data.max_response_length=3000 \
     actor_rollout_ref.model.path=Qwen/Qwen2.5-Math-7B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -45,9 +46,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name='qwen2.5_7b' \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
-    trainer.save_freq=10 \
+    trainer.save_freq=5 \
     trainer.test_freq=2 \
     trainer.total_epochs=15 $@
 
-# Qwen/Qwen2.5-Math-7B
 # actor_rollout_ref.ref.fsdp_config.param_offload=True \

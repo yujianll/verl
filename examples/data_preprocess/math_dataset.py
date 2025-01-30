@@ -17,6 +17,7 @@ Preprocess the GSM8k dataset to parquet format
 
 import os
 import datasets
+import json
 
 from verl.utils.hdfs_io import copy, makedirs
 import argparse
@@ -37,28 +38,20 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    data_source = 'xDAN2099/lighteval-MATH'
-    data_source = '/dccstor/rag_data/math_data'
+    data_file = '/data/yujian_liu/math/data/math_level3to5_data_processed_with_qwen_prompt.json'
+    train_dataset = datasets.load_dataset('json', data_files=[data_file])['train']
+    train_dataset = train_dataset.remove_columns("answer").rename_column("gt_answer", "answer").rename_column("question", "problem")
 
-    dataset = datasets.load_from_disk(data_source)
-    dataset['train'] = dataset['train'].filter(lambda x: any(i in x['level'] for i in ['3', '4', '5']))
-
-    # dataset = datasets.load_dataset(data_source, trust_remote_code=True)
-
-    train_dataset = dataset['train']
-    test_dataset = dataset['test']
-
-    instruction_following = "Let's think step by step and output the final answer within \\boxed{}."
+    test_dataset = datasets.load_dataset("HuggingFaceH4/MATH-500")['test']
+    
+    data_source = 'math'
 
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
 
         def process_fn(example, idx):
             question = example.pop('problem')
-
-            # question = question + ' ' + instruction_following
-
-            answer = example.pop('solution')
+            answer = example.pop('answer')
             solution = extract_solution(answer)
             data = {
                 "data_source": data_source,
@@ -80,8 +73,9 @@ if __name__ == '__main__':
 
         return process_fn
 
-    train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True)
-    test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True)
+    keep_columns = {'data_source', 'prompt', 'ability', 'reward_model', 'extra_info'}
+    train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True, remove_columns=list(set(train_dataset.features) - keep_columns))
+    test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True, remove_columns=list(set(test_dataset.features) - keep_columns))
 
     local_dir = args.local_dir
     hdfs_dir = args.hdfs_dir
