@@ -22,10 +22,12 @@ from verl.utils.hdfs_io import copy, makedirs
 import argparse
 
 from verl.utils.reward_score.math import remove_boxed, last_boxed_only_string
+from verl.utils.reward_score.qwen_math import extract_answer
 
 
 def extract_solution(solution_str):
-    return remove_boxed(last_boxed_only_string(solution_str))
+    # return remove_boxed(last_boxed_only_string(solution_str))
+    return extract_answer(solution_str, 'math')
 
 
 if __name__ == '__main__':
@@ -35,9 +37,13 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    data_source = 'lighteval/MATH'
+    data_source = 'xDAN2099/lighteval-MATH'
+    data_source = '/dccstor/rag_data/math_data'
 
-    dataset = datasets.load_dataset(data_source, trust_remote_code=True)
+    dataset = datasets.load_from_disk(data_source)
+    dataset['train'] = dataset['train'].filter(lambda x: any(i in x['level'] for i in ['3', '4', '5']))
+
+    # dataset = datasets.load_dataset(data_source, trust_remote_code=True)
 
     train_dataset = dataset['train']
     test_dataset = dataset['test']
@@ -50,7 +56,7 @@ if __name__ == '__main__':
         def process_fn(example, idx):
             question = example.pop('problem')
 
-            question = question + ' ' + instruction_following
+            # question = question + ' ' + instruction_following
 
             answer = example.pop('solution')
             solution = extract_solution(answer)
