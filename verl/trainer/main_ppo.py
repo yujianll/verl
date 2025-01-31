@@ -30,8 +30,8 @@ def _select_rm_score_fn(data_source):
     if data_source == 'openai/gsm8k':
         return gsm8k.compute_score
     elif data_source == 'math':
-        return deepseek_math.compute_score
-        # return qwen_math.compute_score
+        # return deepseek_math.compute_score
+        return qwen_math.compute_score
         # return math.compute_score
     else:
         raise NotImplementedError

@@ -677,6 +677,8 @@ def math_equal(
         reference = str_to_pmatrix(reference)
 
     ## deal with [], (), {}
+    prediction = prediction.replace("\\left", "").replace("\\right", "").strip()
+    reference = reference.replace("\\left", "").replace("\\right", "").strip()
     pred_str, ref_str = prediction, reference
     if (
         prediction.startswith("[")
@@ -776,7 +778,8 @@ def math_equal(
         pred = f"{pred[0].strip()} - ({pred[1].strip()})"
         ref = reference.split("=")
         ref = f"{ref[0].strip()} - ({ref[1].strip()})"
-        if symbolic_equal(pred, ref) or symbolic_equal(f"-({pred})", ref):
+        # if symbolic_equal(pred, ref) or symbolic_equal(f"-({pred})", ref):
+        if call_with_timeout(symbolic_equal_process, pred, ref) or call_with_timeout(symbolic_equal_process, f"-({pred})", ref):
             return True
     elif (
         prediction.count("=") == 1
