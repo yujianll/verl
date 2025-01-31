@@ -25,6 +25,7 @@ from enum import Enum
 from pprint import pprint
 from typing import Type, Dict
 from pathlib import Path
+import random
 
 import numpy as np
 from codetiming import Timer
@@ -44,6 +45,9 @@ from verl.utils.seqlen_balancing import (
     get_seqlen_balanced_partitions,
     log_seqlen_unbalance,
 )
+from verl.utils.random_utils import get_rng_states, restore_rng_states
+from verl.utils.dataset.sampler import DistributedSampler
+from verl.utils.checkpoint_utils import find_latest_checkpoint
 
 WorkerType = Type[Worker]
 
@@ -331,9 +335,9 @@ class RayPPOTrainer(object):
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
-            assert (
-                Role.ActorRollout in role_worker_mapping
-            ), f"{role_worker_mapping.keys()=}"
+            assert Role.ActorRollout in role_worker_mapping, (
+                f"{role_worker_mapping.keys()=}"
+            )
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -348,9 +352,9 @@ class RayPPOTrainer(object):
                     kl_coef=config.algorithm.kl_ctrl.kl_coef
                 )
             elif config.algorithm.kl_ctrl.type == "adaptive":
-                assert (
-                    config.algorithm.kl_ctrl.horizon > 0
-                ), f"horizon must be larger than 0. Got {config.critic.kl_ctrl.horizon}"
+                assert config.algorithm.kl_ctrl.horizon > 0, (
+                    f"horizon must be larger than 0. Got {config.critic.kl_ctrl.horizon}"
+                )
                 self.kl_ctrl = core_algos.AdaptiveKLController(
                     init_kl_coef=config.algorithm.kl_ctrl.kl_coef,
                     target_kl=config.algorithm.kl_ctrl.target_kl,
@@ -378,12 +382,20 @@ class RayPPOTrainer(object):
             return_raw_chat=self.config.data.get("return_raw_chat", False),
             truncation="error",
         )
+
+        self.train_sampler = DistributedSampler(
+            dataset=self.train_dataset,
+            seed=self.config.trainer.seed,
+            shuffle=True,
+            drop_last=True,
+            consumed_samples=0,
+        )
         self.train_dataloader = DataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.train_batch_size,
-            shuffle=True,
             drop_last=True,
             collate_fn=collate_fn,
+            sampler=self.train_sampler,
         )
 
         self.val_dataset = RLHFDataset(
@@ -398,7 +410,7 @@ class RayPPOTrainer(object):
         self.val_dataloader = DataLoader(
             dataset=self.val_dataset,
             batch_size=len(self.val_dataset),
-            shuffle=True,
+            shuffle=False,
             drop_last=True,
             collate_fn=collate_fn,
         )
@@ -550,6 +562,11 @@ class RayPPOTrainer(object):
             resource_pool = self.resource_pool_manager.get_resource_pool(
                 Role.ActorRollout
             )
+            if self.config.trainer.resume_checkpoint:
+                self.config.actor_rollout_ref.model.checkpoint_path = os.path.join(
+                    self.config.trainer.default_local_dir, "actor"
+                )
+
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
@@ -564,6 +581,11 @@ class RayPPOTrainer(object):
         # create critic
         if self.config.algorithm.adv_estimator == "gae":
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
+            if self.config.trainer.resume_checkpoint:
+                self.config.critic.model.checkpoint_path = os.path.join(
+                    self.config.trainer.default_local_dir, "critic"
+                )
+
             critic_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.Critic], config=self.config.critic
             )
@@ -654,6 +676,24 @@ class RayPPOTrainer(object):
             )
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
+        # Save global information
+        global_states = {
+            "global_steps": self.global_steps,
+            "epochs": self.epochs,
+            "consumed_samples": self.consumed_samples,
+            "rng_states": get_rng_states(),
+        }
+        torch.save(
+            global_states,
+            open(
+                os.path.join(
+                    actor_local_path,
+                    "global_states.pth",
+                ),
+                "wb",
+            ),
+        )
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch["attention_mask"]
@@ -693,7 +733,31 @@ class RayPPOTrainer(object):
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
-        self.global_steps = 0
+        # TODO: add global step information in the checkpoint dir
+        if self.config.trainer.resume_checkpoint:
+            actor_local_path = os.path.join(
+                self.config.trainer.default_local_dir,
+                "actor",
+            )
+            if os.path.exists(actor_local_path):
+                latest_checkpint = find_latest_checkpoint(actor_local_path)
+                if latest_checkpint is not None:
+                    # global_states = json.load(
+                    #     os.path.join(
+                    #         self.config.trainer.resume_checkpoint, "global_states.json"
+                    #     )
+                    # )
+                    global_states = torch.load(
+                        os.path.join(latest_checkpint, "global_states.pth")
+                    )
+                    restore_rng_states(global_states["rng_states"])
+                    print("Resuming to {}".format(latest_checkpint))
+                else:
+                    global_states = {}
+        else:
+            global_states = {}
+
+        self.global_steps = global_states.get("global_steps", 0)
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -708,8 +772,17 @@ class RayPPOTrainer(object):
 
         # we start from step 1
         self.global_steps += 1
-
         for epoch in range(self.config.trainer.total_epochs):
+            if epoch < global_states.get("epochs", -1):
+                continue
+
+            self.epochs = epoch
+            self.consumed_samples = global_states.get("consumed_samples", 0)
+
+            self.train_dataloader.sampler.set_epoch(
+                self.epochs,
+                consumed_samples=self.consumed_samples,
+            )
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
@@ -850,6 +923,7 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                self.consumed_samples += len(batch)
                 self.global_steps += 1
 
                 if self.global_steps >= self.total_training_steps:
