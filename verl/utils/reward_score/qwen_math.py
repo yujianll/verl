@@ -38,7 +38,7 @@ def compute_score(solution_str, ground_truth, format_score=0.1) -> float:
     answer = extract_answer(solution_str, 'math', use_last_number=False)
     if answer is None or answer == '':
         return 0
-    if math_equal(answer, ground_truth):
+    if math_equal(answer, ground_truth, timeout=True):
         return 1
     return format_score
 
@@ -618,7 +618,7 @@ def str_to_pmatrix(input_str):
     return ", ".join(pmatrix_list)
 
 
-@lru_cache(maxsize=1000)
+@lru_cache(maxsize=50)
 def math_equal(
     prediction: Union[bool, float, str],
     reference: Union[float, str],
