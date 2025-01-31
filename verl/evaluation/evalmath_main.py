@@ -239,7 +239,7 @@ def main(**configs):
     result_dataset.save_to_disk(basedir / "results_data")
 
     pass_at_ks = {}
-    for k in [1, 2, 4, 5, 8, 10]:
+    for k in [1, 2, 4, 5, 8, 10, 16]:
         res = pass_at_k(all_results, k)
         if res is not None:
             pass_at_ks[f"pass@{k}"] = res
