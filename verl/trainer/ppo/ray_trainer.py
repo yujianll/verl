@@ -25,6 +25,7 @@ from enum import Enum
 from pprint import pprint
 from typing import Type, Dict
 from pathlib import Path
+import random
 
 import numpy as np
 from codetiming import Timer
@@ -331,9 +332,9 @@ class RayPPOTrainer(object):
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
         if self.hybrid_engine:
-            assert (
-                Role.ActorRollout in role_worker_mapping
-            ), f"{role_worker_mapping.keys()=}"
+            assert Role.ActorRollout in role_worker_mapping, (
+                f"{role_worker_mapping.keys()=}"
+            )
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -348,9 +349,9 @@ class RayPPOTrainer(object):
                     kl_coef=config.algorithm.kl_ctrl.kl_coef
                 )
             elif config.algorithm.kl_ctrl.type == "adaptive":
-                assert (
-                    config.algorithm.kl_ctrl.horizon > 0
-                ), f"horizon must be larger than 0. Got {config.critic.kl_ctrl.horizon}"
+                assert config.algorithm.kl_ctrl.horizon > 0, (
+                    f"horizon must be larger than 0. Got {config.critic.kl_ctrl.horizon}"
+                )
                 self.kl_ctrl = core_algos.AdaptiveKLController(
                     init_kl_coef=config.algorithm.kl_ctrl.kl_coef,
                     target_kl=config.algorithm.kl_ctrl.target_kl,
@@ -550,6 +551,11 @@ class RayPPOTrainer(object):
             resource_pool = self.resource_pool_manager.get_resource_pool(
                 Role.ActorRollout
             )
+            if self.config.trainer.resume_checkpoint:
+                self.config.actor_rollout_ref.model.checkpoint_path = os.path.join(
+                    self.config.trainer.default_local_dir, "actor"
+                )
+
             actor_rollout_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.ActorRollout],
                 config=self.config.actor_rollout_ref,
@@ -564,6 +570,11 @@ class RayPPOTrainer(object):
         # create critic
         if self.config.algorithm.adv_estimator == "gae":
             resource_pool = self.resource_pool_manager.get_resource_pool(Role.Critic)
+            if self.config.trainer.resume_checkpoint:
+                self.config.critic.model.checkpoint_path = os.path.join(
+                    self.config.trainer.default_local_dir, "critic"
+                )
+
             critic_cls = RayClassWithInitArgs(
                 cls=self.role_worker_mapping[Role.Critic], config=self.config.critic
             )
@@ -654,6 +665,29 @@ class RayPPOTrainer(object):
             )
             self.critic_wg.save_checkpoint(critic_local_path, critic_remote_path)
 
+        # Save global information
+        global_states = {
+            "global_steps": self.global_steps,
+            "epoch_step": self.epoch_index,
+            "epochs": self.global_epochs,
+            "rng_states": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "cpu": torch.random.get_rng_state(),
+                "cuda": torch.cuda.random.get_rng_state_all(),
+            },
+        }
+        json.dump(
+            global_states,
+            open(
+                os.path.join(
+                    actor_local_path,
+                    "global_states.json",
+                )
+            ),
+            indent=2,
+        )
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch["attention_mask"]
@@ -693,6 +727,14 @@ class RayPPOTrainer(object):
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        # TODO: add global step information in the checkpoint dir
+        if self.config.trainer.resume_checkpoint:
+            global_states = json.load(
+                self.config.trainer.resume_checkpoint / "global_states.json"
+            )
+        else:
+            global_states = {}
+
         self.global_steps = 0
 
         # perform validation before training
@@ -708,9 +750,10 @@ class RayPPOTrainer(object):
 
         # we start from step 1
         self.global_steps += 1
-
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            self.epochs = epoch
+            for idx, batch_dict in enumerate(self.train_dataloader):
+                self.epoch_index = idx
                 metrics = {}
                 timing_raw = {}
 
