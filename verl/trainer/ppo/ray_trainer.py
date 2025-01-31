@@ -45,6 +45,9 @@ from verl.utils.seqlen_balancing import (
     get_seqlen_balanced_partitions,
     log_seqlen_unbalance,
 )
+from verl.utils.random_utils import get_rng_states, restore_rng_states
+from verl.utils.dataset.sampler import DistributedSampler
+from verl.utils.checkpoint_utils import find_latest_checkpoint
 
 WorkerType = Type[Worker]
 
@@ -379,12 +382,20 @@ class RayPPOTrainer(object):
             return_raw_chat=self.config.data.get("return_raw_chat", False),
             truncation="error",
         )
+
+        self.train_sampler = DistributedSampler(
+            dataset=self.train_dataset,
+            seed=self.config.trainer.seed,
+            shuffle=True,
+            drop_last=True,
+            consumed_samples=0,
+        )
         self.train_dataloader = DataLoader(
             dataset=self.train_dataset,
             batch_size=self.config.data.train_batch_size,
-            shuffle=True,
             drop_last=True,
             collate_fn=collate_fn,
+            sampler=self.train_sampler,
         )
 
         self.val_dataset = RLHFDataset(
@@ -399,7 +410,7 @@ class RayPPOTrainer(object):
         self.val_dataloader = DataLoader(
             dataset=self.val_dataset,
             batch_size=len(self.val_dataset),
-            shuffle=True,
+            shuffle=False,
             drop_last=True,
             collate_fn=collate_fn,
         )
@@ -668,24 +679,19 @@ class RayPPOTrainer(object):
         # Save global information
         global_states = {
             "global_steps": self.global_steps,
-            "epoch_step": self.epoch_index,
-            "epochs": self.global_epochs,
-            "rng_states": {
-                "python": random.getstate(),
-                "numpy": np.random.get_state(),
-                "cpu": torch.random.get_rng_state(),
-                "cuda": torch.cuda.random.get_rng_state_all(),
-            },
+            "epochs": self.epochs,
+            "consumed_samples": self.consumed_samples,
+            "rng_states": get_rng_states(),
         }
-        json.dump(
+        torch.save(
             global_states,
             open(
                 os.path.join(
                     actor_local_path,
-                    "global_states.json",
-                )
+                    "global_states.pth",
+                ),
+                "wb",
             ),
-            indent=2,
         )
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
@@ -729,13 +735,29 @@ class RayPPOTrainer(object):
 
         # TODO: add global step information in the checkpoint dir
         if self.config.trainer.resume_checkpoint:
-            global_states = json.load(
-                self.config.trainer.resume_checkpoint / "global_states.json"
+            actor_local_path = os.path.join(
+                self.config.trainer.default_local_dir,
+                "actor",
             )
+            if os.path.exists(actor_local_path):
+                latest_checkpint = find_latest_checkpoint(actor_local_path)
+                if latest_checkpint is not None:
+                    # global_states = json.load(
+                    #     os.path.join(
+                    #         self.config.trainer.resume_checkpoint, "global_states.json"
+                    #     )
+                    # )
+                    global_states = torch.load(
+                        os.path.join(latest_checkpint, "global_states.pth")
+                    )
+                    restore_rng_states(global_states["rng_states"])
+                    print("Resuming to {}".format(latest_checkpint))
+                else:
+                    global_states = {}
         else:
             global_states = {}
 
-        self.global_steps = 0
+        self.global_steps = global_states.get("global_steps", 0)
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -751,9 +773,17 @@ class RayPPOTrainer(object):
         # we start from step 1
         self.global_steps += 1
         for epoch in range(self.config.trainer.total_epochs):
+            if epoch < global_states.get("epochs", -1):
+                continue
+
             self.epochs = epoch
-            for idx, batch_dict in enumerate(self.train_dataloader):
-                self.epoch_index = idx
+            self.consumed_samples = global_states.get("consumed_samples", 0)
+
+            self.train_dataloader.sampler.set_epoch(
+                self.epochs,
+                consumed_samples=self.consumed_samples,
+            )
+            for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
 
@@ -893,6 +923,7 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                self.consumed_samples += len(batch)
                 self.global_steps += 1
 
                 if self.global_steps >= self.total_training_steps:
