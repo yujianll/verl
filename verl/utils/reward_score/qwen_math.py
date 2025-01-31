@@ -46,7 +46,7 @@ def compute_score(solution_str, ground_truth, results_cache, lock, format_score=
     process_args = (answer, ground_truth, output_queue,)
     process = multiprocessing.Process(target=math_equal_process, args=process_args)
     process.start()
-    process.join(5)
+    process.join(10)
 
     if process.is_alive():
         process.terminate()
