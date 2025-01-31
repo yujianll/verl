@@ -67,20 +67,6 @@ def math_equal_process(answer, ground_truth, output_queue):
     output_queue.put(result)
 
 
-# def compute_score(solution_str, ground_truth, results_cache, format_score=0.1) -> float:
-#     answer = extract_answer(solution_str, 'math', use_last_number=False)
-#     if answer is None or answer == '':
-#         return 0
-#     if (answer, ground_truth) in results_cache:
-#         return results_cache[(answer, ground_truth)]
-#     if math_equal(answer, ground_truth, timeout=True):
-#         score = 1
-#     else:
-#         score = format_score
-#     results_cache[(answer, ground_truth)] = score
-#     return score
-
-
 def _fix_fracs(string):
     substrs = string.split("\\frac")
     new_str = substrs[0]
