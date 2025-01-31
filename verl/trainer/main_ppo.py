@@ -15,6 +15,9 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from threading import Lock
+
 from verl import DataProto
 import torch
 from verl.utils.reward_score import gsm8k, math, qwen_math, deepseek_math
@@ -26,15 +29,10 @@ logging.basicConfig(
 )
 
 
-def _select_rm_score_fn(data_source):
-    if data_source == 'openai/gsm8k':
-        return gsm8k.compute_score
-    elif data_source == 'math':
-        # return deepseek_math.compute_score
-        return qwen_math.compute_score
-        # return math.compute_score
-    else:
-        raise NotImplementedError
+SOURCE_TO_SCORE_FN = {
+    "openai/gsm8k": gsm8k.compute_score,
+    "math": qwen_math.compute_score
+}
 
 
 class RewardManager():
@@ -47,53 +45,119 @@ class RewardManager():
 
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.setLevel(logging.INFO)
+    
+    # def __call__(self, data: DataProto):
+    #     """We will expand this function gradually based on the available datasets"""
+
+    #     # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
+    #     if 'rm_scores' in data.batch.keys():
+    #         return data.batch['rm_scores']
+
+    #     reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
+
+    #     already_print_data_sources = {}
+        
+    #     results_cache = {} # A dictionary that stores verified results: (extracted_answer, GT) --> score
+
+    #     for i in range(len(data)):
+    #         data_item = data[i]  # DataProtoItem
+
+    #         prompt_ids = data_item.batch['prompts']
+
+    #         prompt_length = prompt_ids.shape[-1]
+
+    #         valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+    #         valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+
+    #         response_ids = data_item.batch['responses']
+    #         valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+    #         valid_response_ids = response_ids[:valid_response_length]
+
+    #         # decode
+    #         sequences = torch.cat((valid_prompt_ids, valid_response_ids))
+    #         sequences_str = self.tokenizer.decode(sequences)
+
+    #         ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+
+    #         # select rm_score
+    #         data_source = data_item.non_tensor_batch['data_source']
+    #         compute_score_fn = SOURCE_TO_SCORE_FN[data_source]
+
+    #         score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, results_cache=results_cache)
+    #         reward_tensor[i, valid_response_length - 1] = score
+
+    #         if data_source not in already_print_data_sources:
+    #             already_print_data_sources[data_source] = 0
+
+    #         if already_print_data_sources[data_source] < self.num_examine:
+    #             already_print_data_sources[data_source] += 1
+    #             self.logger.info(sequences_str)
+
+    #     return reward_tensor
 
     def __call__(self, data: DataProto):
-        """We will expand this function gradually based on the available datasets"""
-
-        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
+        """
+        If there is an rm score in the batch, return that directly. Otherwise, 
+        compute scores asynchronously via a process pool.
+        """
         if 'rm_scores' in data.batch.keys():
             return data.batch['rm_scores']
 
+        # Prepare an empty tensor for the rewards
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
         already_print_data_sources = {}
+        
+        results_cache = {} # A dictionary that stores verified results: (extracted_answer, GT) --> score
+        lock = Lock()
 
-        for i in range(len(data)):
-            data_item = data[i]  # DataProtoItem
+        # We collect futures here, along with an index and the length info needed to place the scores
+        futures = []
+        
+        total_items = len(data)
+        step = 8
 
-            prompt_ids = data_item.batch['prompts']
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for start in range(step):
+                for i in range(start, total_items, step):
+                    data_item = data[i]  # DataProtoItem
 
-            prompt_length = prompt_ids.shape[-1]
+                    prompt_ids = data_item.batch['prompts']
+                    prompt_length = prompt_ids.shape[-1]
+                    valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+                    valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
-            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+                    response_ids = data_item.batch['responses']
+                    valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+                    valid_response_ids = response_ids[:valid_response_length]
 
-            response_ids = data_item.batch['responses']
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
-            valid_response_ids = response_ids[:valid_response_length]
+                    # Decode
+                    sequences = torch.cat((valid_prompt_ids, valid_response_ids))
+                    sequences_str = self.tokenizer.decode(sequences)
 
-            # decode
-            sequences = torch.cat((valid_prompt_ids, valid_response_ids))
-            sequences_str = self.tokenizer.decode(sequences)
+                    ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+                    data_source = data_item.non_tensor_batch['data_source']
 
-            ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+                    compute_score_fn = SOURCE_TO_SCORE_FN[data_source]
 
-            # select rm_score
-            data_source = data_item.non_tensor_batch['data_source']
-            compute_score_fn = _select_rm_score_fn(data_source)
+                    # Handle optional logging
+                    if data_source not in already_print_data_sources:
+                        already_print_data_sources[data_source] = 0
+                    if already_print_data_sources[data_source] < self.num_examine:
+                        already_print_data_sources[data_source] += 1
+                        self.logger.info(f"[{data_source}] Sample sequence: {sequences_str}")
 
-            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth)
-            reward_tensor[i, valid_response_length - 1] = score
+                    # Submit the computation to the process pool
+                    future = executor.submit(compute_score_fn, sequences_str, ground_truth, results_cache, lock)
+                    futures.append((future, i, valid_response_length))
 
-            if data_source not in already_print_data_sources:
-                already_print_data_sources[data_source] = 0
-
-            if already_print_data_sources[data_source] < self.num_examine:
-                already_print_data_sources[data_source] += 1
-                self.logger.info(sequences_str)
+            # Now gather results asynchronously
+            for future, idx, resp_len in futures:
+                score = future.result()
+                reward_tensor[idx, resp_len - 1] = score
 
         return reward_tensor
+
 
 
 import ray

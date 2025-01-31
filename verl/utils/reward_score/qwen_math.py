@@ -34,13 +34,51 @@ from sympy.parsing.sympy_parser import parse_expr
 from word2number import w2n
 
 
-def compute_score(solution_str, ground_truth, format_score=0.1) -> float:
+def compute_score(solution_str, ground_truth, results_cache, lock, format_score=0.1) -> float:
     answer = extract_answer(solution_str, 'math', use_last_number=False)
     if answer is None or answer == '':
         return 0
-    if math_equal(answer, ground_truth, timeout=True):
-        return 1
-    return format_score
+    with lock:
+        if (answer, ground_truth) in results_cache:
+            return results_cache[(answer, ground_truth)]
+    
+    output_queue = multiprocessing.Queue()
+    process_args = (answer, ground_truth, output_queue,)
+    process = multiprocessing.Process(target=math_equal_process, args=process_args)
+    process.start()
+    process.join(5)
+
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        score = format_score
+    else:
+        if output_queue.get():
+            score = 1
+        else:
+            score = format_score
+    with lock:
+        results_cache[(answer, ground_truth)] = score
+    return score
+
+
+def math_equal_process(answer, ground_truth, output_queue):
+    result = math_equal(answer, ground_truth)
+    output_queue.put(result)
+
+
+# def compute_score(solution_str, ground_truth, results_cache, format_score=0.1) -> float:
+#     answer = extract_answer(solution_str, 'math', use_last_number=False)
+#     if answer is None or answer == '':
+#         return 0
+#     if (answer, ground_truth) in results_cache:
+#         return results_cache[(answer, ground_truth)]
+#     if math_equal(answer, ground_truth, timeout=True):
+#         score = 1
+#     else:
+#         score = format_score
+#     results_cache[(answer, ground_truth)] = score
+#     return score
 
 
 def _fix_fracs(string):
@@ -618,7 +656,7 @@ def str_to_pmatrix(input_str):
     return ", ".join(pmatrix_list)
 
 
-@lru_cache(maxsize=50)
+# @lru_cache(maxsize=100)
 def math_equal(
     prediction: Union[bool, float, str],
     reference: Union[float, str],
@@ -778,9 +816,12 @@ def math_equal(
         pred = f"{pred[0].strip()} - ({pred[1].strip()})"
         ref = reference.split("=")
         ref = f"{ref[0].strip()} - ({ref[1].strip()})"
-        # if symbolic_equal(pred, ref) or symbolic_equal(f"-({pred})", ref):
-        if call_with_timeout(symbolic_equal_process, pred, ref) or call_with_timeout(symbolic_equal_process, f"-({pred})", ref):
-            return True
+        if timeout:
+            if call_with_timeout(symbolic_equal_process, pred, ref) or call_with_timeout(symbolic_equal_process, f"-({pred})", ref):
+                return True
+        else:
+            if symbolic_equal(pred, ref) or symbolic_equal(f"-({pred})", ref):
+                return True
     elif (
         prediction.count("=") == 1
         and len(prediction.split("=")[0].strip()) <= 2

@@ -4,7 +4,7 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 
 N_GPUS=8
 TP=1
-MODEL_DIR=/data/yujian_liu/math/ckpts/Qwen-7B
+MODEL_DIR=/data/yujian_liu/math/ckpts/Qwen-7B_qweneval
 DATA_DIR=/data/yujian_liu/math/data/verl_train
 BATCH_SIZE=8
 FW_BS=$((BATCH_SIZE * 2))
@@ -43,11 +43,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_hdfs_dir=null \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_math' \
-    trainer.experiment_name='qwen2.5_7b' \
+    trainer.experiment_name='qwen2.5_7b_qweneval' \
     trainer.n_gpus_per_node=$N_GPUS \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
-    trainer.test_freq=2 \
+    trainer.test_freq=3 \
     trainer.total_epochs=15 $@
 
 # actor_rollout_ref.ref.fsdp_config.param_offload=True \
